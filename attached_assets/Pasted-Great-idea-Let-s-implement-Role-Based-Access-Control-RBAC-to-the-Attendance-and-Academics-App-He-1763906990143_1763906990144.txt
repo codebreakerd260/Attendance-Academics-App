@@ -1,0 +1,1038 @@
+Great idea! Let's implement Role-Based Access Control (RBAC) to the Attendance and Academics App. Here's the enhanced implementation:
+
+## Updated Backend with RBAC
+
+### Updated backend/models.py
+python
+from database import db
+from datetime import datetime
+from werkzeug.security import generate_password_hash, check_password_hash
+
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password_hash = db.Column(db.String(128))
+    role_id = db.Column(db.Integer, db.ForeignKey('role.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    role = db.relationship('Role', backref='users')
+    
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+    
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
+    
+    def has_permission(self, permission):
+        return self.role.has_permission(permission)
+
+class Role(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(50), unique=True, nullable=False)
+    description = db.Column(db.String(200))
+    
+    # Relationships
+    permissions = db.relationship('Permission', secondary='role_permission', backref='roles')
+    
+    def has_permission(self, permission):
+        return any(perm.name == permission for perm in self.permissions)
+
+class Permission(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(50), unique=True, nullable=False)
+    description = db.Column(db.String(200))
+
+# Association table for role-permission many-to-many relationship
+role_permission = db.Table('role_permission',
+    db.Column('role_id', db.Integer, db.ForeignKey('role.id'), primary_key=True),
+    db.Column('permission_id', db.Integer, db.ForeignKey('permission.id'), primary_key=True)
+)
+
+# Existing models (Student, Attendance, Grade) remain the same
+class Student(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    student_id = db.Column(db.String(20), unique=True, nullable=False)
+    name = db.Column(db.String(100), nullable=False)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    class_name = db.Column(db.String(50), nullable=False)
+    created_by = db.Column(db.Integer, db.ForeignKey('user.id'))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    attendance = db.relationship('Attendance', backref='student', lazy=True)
+    grades = db.relationship('Grade', backref='student', lazy=True)
+
+class Attendance(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    student_id = db.Column(db.Integer, db.ForeignKey('student.id'), nullable=False)
+    date = db.Column(db.Date, nullable=False)
+    status = db.Column(db.String(10), nullable=False)
+    subject = db.Column(db.String(50), nullable=False)
+    created_by = db.Column(db.Integer, db.ForeignKey('user.id'))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class Grade(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    student_id = db.Column(db.Integer, db.ForeignKey('student.id'), nullable=False)
+    subject = db.Column(db.String(50), nullable=False)
+    assignment = db.Column(db.String(100), nullable=False)
+    score = db.Column(db.Float, nullable=False)
+    max_score = db.Column(db.Float, nullable=False)
+    date = db.Column(db.Date, nullable=False)
+    created_by = db.Column(db.Integer, db.ForeignKey('user.id'))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+### backend/auth.py
+python
+from flask import jsonify, request
+from functools import wraps
+import jwt
+import datetime
+from models import User, Role, Permission
+from database import db
+
+class Auth:
+    @staticmethod
+    def generate_token(user_id, secret_key):
+        payload = {
+            'exp': datetime.datetime.utcnow() + datetime.timedelta(days=1),
+            'iat': datetime.datetime.utcnow(),
+            'sub': user_id
+        }
+        return jwt.encode(payload, secret_key, algorithm='HS256')
+    
+    @staticmethod
+    def decode_token(token, secret_key):
+        try:
+            payload = jwt.decode(token, secret_key, algorithms=['HS256'])
+            return payload['sub']
+        except jwt.ExpiredSignatureError:
+            return None
+        except jwt.InvalidTokenError:
+            return None
+
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+        
+        if 'Authorization' in request.headers:
+            auth_header = request.headers['Authorization']
+            try:
+                token = auth_header.split(" ")[1]
+            except IndexError:
+                return jsonify({'message': 'Invalid token format'}), 401
+        
+        if not token:
+            return jsonify({'message': 'Token is missing'}), 401
+        
+        try:
+            from app import app
+            user_id = Auth.decode_token(token, app.config['SECRET_KEY'])
+            if not user_id:
+                return jsonify({'message': 'Token is invalid'}), 401
+            
+            current_user = User.query.get(user_id)
+            if not current_user:
+                return jsonify({'message': 'User not found'}), 401
+            
+        except Exception as e:
+            return jsonify({'message': 'Token is invalid'}), 401
+        
+        return f(current_user, *args, **kwargs)
+    
+    return decorated
+
+def permission_required(permission):
+    def decorator(f):
+        @wraps(f)
+        @token_required
+        def decorated(current_user, *args, **kwargs):
+            if not current_user.has_permission(permission):
+                return jsonify({'message': 'Insufficient permissions'}), 403
+            return f(current_user, *args, **kwargs)
+        return decorated
+    return decorator
+
+# Role-based decorators
+def admin_required(f):
+    return permission_required('admin')(f)
+
+def teacher_required(f):
+    return permission_required('manage_students')(f)
+
+def viewer_required(f):
+    return permission_required('view_data')(f)
+
+
+### Updated backend/app.py
+python
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from database import db
+from models import User, Role, Permission, Student, Attendance, Grade
+from auth import Auth, token_required, permission_required, admin_required, teacher_required, viewer_required
+from datetime import datetime
+import pandas as pd
+
+def create_app():
+    app = Flask(__name__)
+    app.config.from_object('config.Config')
+    
+    # Initialize extensions
+    db.init_app(app)
+    CORS(app)
+    
+    # Create tables and seed initial data
+    with app.app_context():
+        db.create_all()
+        seed_initial_data()
+    
+    def seed_initial_data():
+        # Create permissions
+        permissions = {
+            'admin': 'Full system access',
+            'manage_students': 'Add, edit, and delete students',
+            'manage_attendance': 'Mark and manage attendance',
+            'manage_grades': 'Add and manage grades',
+            'view_data': 'View all data',
+            'view_analytics': 'Access analytics and reports'
+        }
+        
+        for perm_name, description in permissions.items():
+            if not Permission.query.filter_by(name=perm_name).first():
+                permission = Permission(name=perm_name, description=description)
+                db.session.add(permission)
+        
+        # Create roles
+        roles = {
+            'admin': ['admin', 'manage_students', 'manage_attendance', 'manage_grades', 'view_data', 'view_analytics'],
+            'teacher': ['manage_students', 'manage_attendance', 'manage_grades', 'view_data', 'view_analytics'],
+            'viewer': ['view_data', 'view_analytics']
+        }
+        
+        for role_name, perm_names in roles.items():
+            role = Role.query.filter_by(name=role_name).first()
+            if not role:
+                role = Role(name=role_name, description=f'{role_name.title()} role')
+                db.session.add(role)
+                db.session.flush()  # Get the role ID
+            
+            for perm_name in perm_names:
+                permission = Permission.query.filter_by(name=perm_name).first()
+                if permission and permission not in role.permissions:
+                    role.permissions.append(permission)
+        
+        # Create default admin user
+        if not User.query.filter_by(username='admin').first():
+            admin_role = Role.query.filter_by(name='admin').first()
+            admin_user = User(
+                username='admin',
+                email='admin@school.edu',
+                role_id=admin_role.id
+            )
+            admin_user.set_password('admin123')
+            db.session.add(admin_user)
+        
+        db.session.commit()
+    
+    # Authentication routes
+    @app.route('/api/auth/register', methods=['POST'])
+    @admin_required
+    def register(current_user):
+        data = request.json
+        role = Role.query.filter_by(name=data.get('role', 'viewer')).first()
+        
+        if not role:
+            return jsonify({'message': 'Invalid role'}), 400
+        
+        user = User(
+            username=data['username'],
+            email=data['email'],
+            role_id=role.id
+        )
+        user.set_password(data['password'])
+        
+        db.session.add(user)
+        db.session.commit()
+        
+        return jsonify({'message': 'User created successfully'}), 201
+    
+    @app.route('/api/auth/login', methods=['POST'])
+    def login():
+        data = request.json
+        user = User.query.filter_by(username=data['username']).first()
+        
+        if user and user.check_password(data['password']):
+            token = Auth.generate_token(user.id, app.config['SECRET_KEY'])
+            return jsonify({
+                'token': token,
+                'user': {
+                    'id': user.id,
+                    'username': user.username,
+                    'email': user.email,
+                    'role': user.role.name
+                }
+            })
+        
+        return jsonify({'message': 'Invalid credentials'}), 401
+    
+    # Student routes with RBAC
+    @app.route('/api/students', methods=['GET'])
+    @token_required
+    def get_students(current_user):
+        students = Student.query.all()
+        return jsonify([{
+            'id': s.id,
+            'student_id': s.student_id,
+            'name': s.name,
+            'email': s.email,
+            'class_name': s.class_name
+        } for s in students])
+    
+    @app.route('/api/students', methods=['POST'])
+    @permission_required('manage_students')
+    def create_student(current_user):
+        data = request.json
+        student = Student(
+            student_id=data['student_id'],
+            name=data['name'],
+            email=data['email'],
+            class_name=data['class_name'],
+            created_by=current_user.id
+        )
+        db.session.add(student)
+        db.session.commit()
+        return jsonify({"message": "Student created successfully"}), 201
+    
+    # Attendance routes with RBAC
+    @app.route('/api/attendance', methods=['POST'])
+    @permission_required('manage_attendance')
+    def mark_attendance(current_user):
+        data = request.json
+        attendance = Attendance(
+            student_id=data['student_id'],
+            date=datetime.strptime(data['date'], '%Y-%m-%d').date(),
+            status=data['status'],
+            subject=data['subject'],
+            created_by=current_user.id
+        )
+        db.session.add(attendance)
+        db.session.commit()
+        return jsonify({"message": "Attendance marked successfully"}), 201
+    
+    @app.route('/api/attendance/<int:student_id>', methods=['GET'])
+    @token_required
+    def get_student_attendance(current_user, student_id):
+        # Teachers and admins can see all, viewers can only see their own students
+        if not current_user.has_permission('manage_students'):
+            # In a real app, you'd have student-teacher relationships
+            return jsonify({'message': 'Insufficient permissions'}), 403
+        
+        attendances = Attendance.query.filter_by(student_id=student_id).all()
+        return jsonify([{
+            'id': a.id,
+            'date': a.date.isoformat(),
+            'status': a.status,
+            'subject': a.subject
+        } for a in attendances])
+    
+    # Grade routes with RBAC
+    @app.route('/api/grades', methods=['POST'])
+    @permission_required('manage_grades')
+    def add_grade(current_user):
+        data = request.json
+        grade = Grade(
+            student_id=data['student_id'],
+            subject=data['subject'],
+            assignment=data['assignment'],
+            score=data['score'],
+            max_score=data['max_score'],
+            date=datetime.strptime(data['date'], '%Y-%m-%d').date(),
+            created_by=current_user.id
+        )
+        db.session.add(grade)
+        db.session.commit()
+        return jsonify({"message": "Grade added successfully"}), 201
+    
+    # Analytics routes with RBAC
+    @app.route('/api/analytics/attendance-summary')
+    @permission_required('view_analytics')
+    def attendance_summary(current_user):
+        summary = db.session.query(
+            Student.name,
+            Student.class_name,
+            Attendance.subject,
+            db.func.count(Attendance.id).label('total_classes'),
+            db.func.sum(db.case((Attendance.status == 'Present', 1), else_=0)).label('present_count')
+        ).join(Attendance).group_by(Student.name, Student.class_name, Attendance.subject).all()
+        
+        result = []
+        for row in summary:
+            attendance_rate = (row.present_count / row.total_classes * 100) if row.total_classes > 0 else 0
+            result.append({
+                'student_name': row.name,
+                'class_name': row.class_name,
+                'subject': row.subject,
+                'total_classes': row.total_classes,
+                'present_count': row.present_count,
+                'attendance_rate': round(attendance_rate, 2)
+            })
+        
+        return jsonify(result)
+    
+    # User management routes (admin only)
+    @app.route('/api/users', methods=['GET'])
+    @admin_required
+    def get_users(current_user):
+        users = User.query.all()
+        return jsonify([{
+            'id': u.id,
+            'username': u.username,
+            'email': u.email,
+            'role': u.role.name
+        } for u in users])
+    
+    @app.route('/api/roles', methods=['GET'])
+    @admin_required
+    def get_roles(current_user):
+        roles = Role.query.all()
+        return jsonify([{
+            'id': r.id,
+            'name': r.name,
+            'description': r.description,
+            'permissions': [p.name for p in r.permissions]
+        } for r in roles])
+    
+    return app
+
+if __name__ == '__main__':
+    app = create_app()
+    app.run(debug=True, port=5000)
+
+
+## Updated Frontend with RBAC
+
+### frontend/src/services/auth.js
+javascript
+import axios from 'axios';
+
+const API_BASE_URL = 'http://localhost:5000/api';
+
+class AuthService {
+  constructor() {
+    this.token = localStorage.getItem('token');
+    this.user = JSON.parse(localStorage.getItem('user'));
+  }
+
+  async login(username, password) {
+    try {
+      const response = await axios.post(`${API_BASE_URL}/auth/login`, {
+        username,
+        password
+      });
+      
+      if (response.data.token) {
+        this.setToken(response.data.token);
+        this.setUser(response.data.user);
+      }
+      
+      return response.data;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  logout() {
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    this.token = null;
+    this.user = null;
+  }
+
+  setToken(token) {
+    this.token = token;
+    localStorage.setItem('token', token);
+  }
+
+  setUser(user) {
+    this.user = user;
+    localStorage.setItem('user', JSON.stringify(user));
+  }
+
+  getAuthHeader() {
+    return this.token ? { 'Authorization': `Bearer ${this.token}` } : {};
+  }
+
+  hasPermission(permission) {
+    if (!this.user) return false;
+    
+    // Admin has all permissions
+    if (this.user.role === 'admin') return true;
+    
+    // Define role permissions (in a real app, this would come from the backend)
+    const rolePermissions = {
+      teacher: ['manage_students', 'manage_attendance', 'manage_grades', 'view_data', 'view_analytics'],
+      viewer: ['view_data', 'view_analytics']
+    };
+    
+    return rolePermissions[this.user.role]?.includes(permission) || false;
+  }
+
+  isAdmin() {
+    return this.user?.role === 'admin';
+  }
+
+  isTeacher() {
+    return this.user?.role === 'teacher';
+  }
+
+  isViewer() {
+    return this.user?.role === 'viewer';
+  }
+}
+
+export default new AuthService();
+
+
+### Updated frontend/src/services/api.js
+javascript
+import axios from 'axios';
+import AuthService from './auth';
+
+const API_BASE_URL = 'http://localhost:5000/api';
+
+const api = axios.create({
+  baseURL: API_BASE_URL,
+});
+
+// Add auth token to requests
+api.interceptors.request.use(
+  (config) => {
+    const token = AuthService.token;
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  },
+  (error) => {
+    return Promise.reject(error);
+  }
+);
+
+// Handle auth errors
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      AuthService.logout();
+      window.location.href = '/login';
+    }
+    return Promise.reject(error);
+  }
+);
+
+export const authAPI = {
+  login: (credentials) => api.post('/auth/login', credentials),
+  register: (userData) => api.post('/auth/register', userData),
+};
+
+export const userAPI = {
+  getAll: () => api.get('/users'),
+  getRoles: () => api.get('/roles'),
+};
+
+export const studentAPI = {
+  getAll: () => api.get('/students'),
+  create: (studentData) => api.post('/students', studentData),
+};
+
+export const attendanceAPI = {
+  mark: (attendanceData) => api.post('/attendance', attendanceData),
+  getByStudent: (studentId) => api.get(`/attendance/${studentId}`),
+};
+
+export const gradesAPI = {
+  add: (gradeData) => api.post('/grades', gradeData),
+  getByStudent: (studentId) => api.get(`/grades/${studentId}`),
+};
+
+export const analyticsAPI = {
+  attendanceSummary: () => api.get('/analytics/attendance-summary'),
+  gradesSummary: () => api.get('/analytics/grades-summary'),
+};
+
+
+### frontend/src/components/Login.js
+javascript
+import React, { useState } from 'react';
+import { authAPI } from '../services/api';
+import AuthService from '../services/auth';
+
+const Login = ({ onLogin }) => {
+  const [credentials, setCredentials] = useState({
+    username: '',
+    password: ''
+  });
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const response = await authAPI.login(credentials.username, credentials.password);
+      onLogin(response.user);
+    } catch (error) {
+      alert('Login failed: ' + (error.response?.data?.message || 'Invalid credentials'));
+    }
+  };
+
+  const handleChange = (e) => {
+    setCredentials({
+      ...credentials,
+      [e.target.name]: e.target.value
+    });
+  };
+
+  return (
+    <div className="login-container">
+      <form onSubmit={handleSubmit} className="login-form">
+        <h2>Login</h2>
+        <input
+          type="text"
+          name="username"
+          placeholder="Username"
+          value={credentials.username}
+          onChange={handleChange}
+          required
+        />
+        <input
+          type="password"
+          name="password"
+          placeholder="Password"
+          value={credentials.password}
+          onChange={handleChange}
+          required
+        />
+        <button type="submit">Login</button>
+        <div className="demo-accounts">
+          <p><strong>Demo Accounts:</strong></p>
+          <p>Admin: admin / admin123</p>
+          <p>Try creating teacher/viewer accounts via admin panel</p>
+        </div>
+      </form>
+    </div>
+  );
+};
+
+export default Login;
+
+
+### frontend/src/components/UserManagement.js
+javascript
+import React, { useState, useEffect } from 'react';
+import { userAPI, authAPI } from '../services/api';
+import AuthService from '../services/auth';
+
+const UserManagement = () => {
+  const [users, setUsers] = useState([]);
+  const [roles, setRoles] = useState([]);
+  const [newUser, setNewUser] = useState({
+    username: '',
+    email: '',
+    password: '',
+    role: 'viewer'
+  });
+
+  useEffect(() => {
+    loadUsers();
+    loadRoles();
+  }, []);
+
+  const loadUsers = async () => {
+    try {
+      const response = await userAPI.getAll();
+      setUsers(response.data);
+    } catch (error) {
+      console.error('Error loading users:', error);
+    }
+  };
+
+  const loadRoles = async () => {
+    try {
+      const response = await userAPI.getRoles();
+      setRoles(response.data);
+    } catch (error) {
+      console.error('Error loading roles:', error);
+    }
+  };
+
+  const handleCreateUser = async (e) => {
+    e.preventDefault();
+    try {
+      await authAPI.register(newUser);
+      setNewUser({ username: '', email: '', password: '', role: 'viewer' });
+      loadUsers();
+      alert('User created successfully!');
+    } catch (error) {
+      alert('Error creating user: ' + (error.response?.data?.message || 'Unknown error'));
+    }
+  };
+
+  if (!AuthService.isAdmin()) {
+    return <div>Access denied. Admin rights required.</div>;
+  }
+
+  return (
+    <div className="user-management">
+      <h3>User Management</h3>
+      
+      <form onSubmit={handleCreateUser} className="user-form">
+        <h4>Create New User</h4>
+        <input
+          type="text"
+          placeholder="Username"
+          value={newUser.username}
+          onChange={(e) => setNewUser({...newUser, username: e.target.value})}
+          required
+        />
+        <input
+          type="email"
+          placeholder="Email"
+          value={newUser.email}
+          onChange={(e) => setNewUser({...newUser, email: e.target.value})}
+          required
+        />
+        <input
+          type="password"
+          placeholder="Password"
+          value={newUser.password}
+          onChange={(e) => setNewUser({...newUser, password: e.target.value})}
+          required
+        />
+        <select
+          value={newUser.role}
+          onChange={(e) => setNewUser({...newUser, role: e.target.value})}
+        >
+          {roles.map(role => (
+            <option key={role.name} value={role.name}>
+              {role.name}
+            </option>
+          ))}
+        </select>
+        <button type="submit">Create User</button>
+      </form>
+
+      <div className="users-list">
+        <h4>Existing Users</h4>
+        <table>
+          <thead>
+            <tr>
+              <th>Username</th>
+              <th>Email</th>
+              <th>Role</th>
+            </tr>
+          </thead>
+          <tbody>
+            {users.map(user => (
+              <tr key={user.id}>
+                <td>{user.username}</td>
+                <td>{user.email}</td>
+                <td>{user.role}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+export default UserManagement;
+
+
+### Updated frontend/src/App.js
+javascript
+import React, { useState, useEffect } from 'react';
+import Login from './components/Login';
+import StudentForm from './components/StudentForm';
+import AttendanceTracker from './components/AttendanceTracker';
+import GradeManager from './components/GradeManager';
+import Dashboard from './components/Dashboard';
+import UserManagement from './components/UserManagement';
+import AuthService from './services/auth';
+import './App.css';
+
+function App() {
+  const [user, setUser] = useState(null);
+  const [activeTab, setActiveTab] = useState('dashboard');
+
+  useEffect(() => {
+    // Check if user is already logged in
+    const savedUser = AuthService.user;
+    if (savedUser) {
+      setUser(savedUser);
+    }
+  }, []);
+
+  const handleLogin = (userData) => {
+    setUser(userData);
+    setActiveTab('dashboard');
+  };
+
+  const handleLogout = () => {
+    AuthService.logout();
+    setUser(null);
+  };
+
+  if (!user) {
+    return <Login onLogin={handleLogin} />;
+  }
+
+  return (
+    <div className="App">
+      <header className="App-header">
+        <h1>Attendance & Academics App</h1>
+        <div className="user-info">
+          <span>Welcome, {user.username} ({user.role})</span>
+          <button onClick={handleLogout}>Logout</button>
+        </div>
+        <nav>
+          <button onClick={() => setActiveTab('dashboard')}>Dashboard</button>
+          {AuthService.hasPermission('manage_students') && (
+            <button onClick={() => setActiveTab('students')}>Students</button>
+          )}
+          {AuthService.hasPermission('manage_attendance') && (
+            <button onClick={() => setActiveTab('attendance')}>Attendance</button>
+          )}
+          {AuthService.hasPermission('manage_grades') && (
+            <button onClick={() => setActiveTab('grades')}>Grades</button>
+          )}
+          {AuthService.isAdmin() && (
+            <button onClick={() => setActiveTab('users')}>User Management</button>
+          )}
+        </nav>
+      </header>
+
+      <main>
+        {activeTab === 'dashboard' && <Dashboard />}
+        {activeTab === 'students' && <StudentForm onStudentAdded={() => {}} />}
+        {activeTab === 'attendance' && <AttendanceTracker />}
+        {activeTab === 'grades' && <GradeManager />}
+        {activeTab === 'users' && <UserManagement />}
+      </main>
+    </div>
+  );
+}
+
+export default App;
+
+
+### Updated frontend/src/App.css
+css
+.App {
+  font-family: Arial, sans-serif;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.App-header {
+  background-color: #282c34;
+  padding: 20px;
+  color: white;
+  text-align: center;
+  border-radius: 8px;
+  margin-bottom: 20px;
+}
+
+.user-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 15px;
+}
+
+.user-info button {
+  background-color: #ff4757;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 4px;
+  color: white;
+  cursor: pointer;
+}
+
+.user-info button:hover {
+  background-color: #ff3742;
+}
+
+nav {
+  margin-top: 15px;
+}
+
+nav button {
+  background-color: #61dafb;
+  border: none;
+  padding: 10px 20px;
+  margin: 0 5px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: bold;
+}
+
+nav button:hover {
+  background-color: #21a0c4;
+}
+
+.login-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  background-color: #f5f5f5;
+}
+
+.login-form {
+  background: white;
+  padding: 40px;
+  border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+  width: 300px;
+}
+
+.login-form h2 {
+  text-align: center;
+  margin-bottom: 20px;
+}
+
+.login-form input {
+  width: 100%;
+  padding: 10px;
+  margin: 10px 0;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  box-sizing: border-box;
+}
+
+.login-form button {
+  width: 100%;
+  padding: 10px;
+  background-color: #4CAF50;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.demo-accounts {
+  margin-top: 20px;
+  padding: 15px;
+  background-color: #f8f9fa;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+.user-management table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 20px;
+}
+
+.user-management th,
+.user-management td {
+  border: 1px solid #ddd;
+  padding: 8px;
+  text-align: left;
+}
+
+.user-management th {
+  background-color: #f2f2f2;
+}
+
+/* Existing styles remain the same */
+.student-form,
+.attendance-tracker,
+.grade-manager {
+  background-color: #f5f5f5;
+  padding: 20px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+}
+
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 400px;
+}
+
+input, select, button {
+  padding: 10px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+button {
+  background-color: #4CAF50;
+  color: white;
+  border: none;
+  cursor: pointer;
+  font-weight: bold;
+}
+
+button:hover {
+  background-color: #45a049;
+}
+
+
+## RBAC Permission Structure
+
+### Roles and Permissions:
+
+1. *Admin*
+   - All permissions
+   - User management
+   - System configuration
+
+2. *Teacher*
+   - manage_students: Add/edit students
+   - manage_attendance: Mark attendance
+   - manage_grades: Add grades
+   - view_data: View all data
+   - view_analytics: Access reports
+
+3. *Viewer*
+   - view_data: Read-only access to data
+   - view_analytics: Access to reports
+
+## Setup Instructions
+
+### Backend Setup:
+bash
+cd backend
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+pip install pyjwt  # Add JWT support
+python app.py
+
+
+### Frontend Setup:
+bash
+cd frontend
+npm install
+npm start
+
+
+## Default Login Credentials
+- *Admin*: username: admin, password: admin123
+
+This RBAC implementation provides:
+- ✅ Secure authentication with JWT
+- ✅ Role-based permission checking
+- ✅ Protected API endpoints
+- ✅ Dynamic UI based on user roles
+- ✅ User management (admin only)
+- ✅ Flexible permission system
+
+The system is easily extensible to add more roles and permissions as needed!
