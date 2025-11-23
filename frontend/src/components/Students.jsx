@@ -5,6 +5,7 @@ import AuthService from '../services/auth';
 const Students = () => {
   const [students, setStudents] = useState([]);
   const [showForm, setShowForm] = useState(false);
+  const [editingStudent, setEditingStudent] = useState(null);
   const [newStudent, setNewStudent] = useState({
     student_id: '',
     name: '',
@@ -31,13 +32,37 @@ const Students = () => {
     setError('');
     
     try {
-      await studentAPI.create(newStudent);
+      if (editingStudent) {
+        await studentAPI.update(editingStudent.id, newStudent);
+        setEditingStudent(null);
+      } else {
+        await studentAPI.create(newStudent);
+      }
       setNewStudent({ student_id: '', name: '', email: '', class_name: '' });
       setShowForm(false);
       loadStudents();
     } catch (error) {
-      setError(error.response?.data?.message || 'Error creating student');
+      setError(error.response?.data?.message || 'Error saving student');
     }
+  };
+
+  const handleEdit = (student) => {
+    setEditingStudent(student);
+    setNewStudent({
+      student_id: student.student_id,
+      name: student.name,
+      email: student.email,
+      class_name: student.class_name
+    });
+    setShowForm(true);
+    setError('');
+  };
+
+  const handleCancel = () => {
+    setShowForm(false);
+    setEditingStudent(null);
+    setNewStudent({ student_id: '', name: '', email: '', class_name: '' });
+    setError('');
   };
 
   const handleDelete = async (id) => {
@@ -59,7 +84,15 @@ const Students = () => {
         <h2 className="text-2xl font-bold text-gray-800">Students</h2>
         {canManage && (
           <button
-            onClick={() => setShowForm(!showForm)}
+            onClick={() => {
+              if (showForm) {
+                handleCancel();
+              } else {
+                setShowForm(true);
+                setEditingStudent(null);
+                setNewStudent({ student_id: '', name: '', email: '', class_name: '' });
+              }
+            }}
             className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700"
           >
             {showForm ? 'Cancel' : '+ Add Student'}
@@ -69,7 +102,9 @@ const Students = () => {
 
       {showForm && canManage && (
         <div className="bg-white p-6 rounded-lg shadow">
-          <h3 className="text-xl font-semibold mb-4">Add New Student</h3>
+          <h3 className="text-xl font-semibold mb-4">
+            {editingStudent ? 'Edit Student' : 'Add New Student'}
+          </h3>
           {error && (
             <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
               {error}
@@ -84,6 +119,7 @@ const Students = () => {
                 onChange={(e) => setNewStudent({...newStudent, student_id: e.target.value})}
                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                 required
+                disabled={!!editingStudent}
               />
             </div>
             <div>
@@ -121,7 +157,7 @@ const Students = () => {
                 type="submit"
                 className="bg-green-600 text-white px-6 py-2 rounded-lg hover:bg-green-700"
               >
-                Add Student
+                {editingStudent ? 'Update Student' : 'Add Student'}
               </button>
             </div>
           </form>
@@ -150,12 +186,20 @@ const Students = () => {
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{student.class_name}</td>
                 {canManage && (
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                    <button
-                      onClick={() => handleDelete(student.id)}
-                      className="text-red-600 hover:text-red-900"
-                    >
-                      Delete
-                    </button>
+                    <div className="flex space-x-2">
+                      <button
+                        onClick={() => handleEdit(student)}
+                        className="text-blue-600 hover:text-blue-900"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => handleDelete(student.id)}
+                        className="text-red-600 hover:text-red-900"
+                      >
+                        Delete
+                      </button>
+                    </div>
                   </td>
                 )}
               </tr>

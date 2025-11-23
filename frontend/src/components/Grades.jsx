@@ -5,6 +5,7 @@ import AuthService from '../services/auth';
 const Grades = () => {
   const [students, setStudents] = useState([]);
   const [selectedStudent, setSelectedStudent] = useState('');
+  const [editingGrade, setEditingGrade] = useState(null);
   const [gradeData, setGradeData] = useState({
     subject: '',
     assignment: '',
@@ -50,6 +51,24 @@ const Grades = () => {
     e.preventDefault();
     setError('');
     
+    if (editingGrade) {
+      try {
+        await gradesAPI.update(editingGrade.id, gradeData);
+        setEditingGrade(null);
+        setGradeData({
+          subject: '',
+          assignment: '',
+          score: '',
+          max_score: '',
+          date: new Date().toISOString().split('T')[0]
+        });
+        if (selectedStudent) loadGradesHistory(selectedStudent);
+      } catch (error) {
+        setError(error.response?.data?.message || 'Error updating grade');
+      }
+      return;
+    }
+    
     if (!selectedStudent) {
       setError('Please select a student');
       return;
@@ -73,6 +92,29 @@ const Grades = () => {
     }
   };
 
+  const handleEdit = (grade) => {
+    setEditingGrade(grade);
+    setGradeData({
+      subject: grade.subject,
+      assignment: grade.assignment,
+      score: grade.score,
+      max_score: grade.max_score,
+      date: grade.date
+    });
+    setSelectedStudent('');
+  };
+
+  const handleDelete = async (id) => {
+    if (window.confirm('Are you sure you want to delete this grade?')) {
+      try {
+        await gradesAPI.delete(id);
+        if (selectedStudent) loadGradesHistory(selectedStudent);
+      } catch (error) {
+        alert('Error deleting grade');
+      }
+    }
+  };
+
   const canManage = AuthService.hasPermission('manage_grades');
 
   return (
@@ -81,29 +123,33 @@ const Grades = () => {
 
       {canManage && (
         <div className="bg-white p-6 rounded-lg shadow">
-          <h3 className="text-xl font-semibold mb-4">Add Grade</h3>
+          <h3 className="text-xl font-semibold mb-4">
+            {editingGrade ? 'Edit Grade' : 'Add Grade'}
+          </h3>
           {error && (
             <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
               {error}
             </div>
           )}
           <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Student</label>
-              <select
-                value={selectedStudent}
-                onChange={(e) => handleStudentChange(e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                required
-              >
-                <option value="">Select a student</option>
-                {students.map((student) => (
-                  <option key={student.id} value={student.id}>
-                    {student.student_id} - {student.name}
-                  </option>
-                ))}
-              </select>
-            </div>
+            {!editingGrade && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Student</label>
+                <select
+                  value={selectedStudent}
+                  onChange={(e) => handleStudentChange(e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                  required
+                >
+                  <option value="">Select a student</option>
+                  {students.map((student) => (
+                    <option key={student.id} value={student.id}>
+                      {student.student_id} - {student.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">Subject</label>
               <input
@@ -158,13 +204,31 @@ const Grades = () => {
                 required
               />
             </div>
-            <div className="md:col-span-2">
+            <div className="md:col-span-2 flex space-x-2">
               <button
                 type="submit"
                 className="bg-green-600 text-white px-6 py-2 rounded-lg hover:bg-green-700"
               >
-                Add Grade
+                {editingGrade ? 'Update Grade' : 'Add Grade'}
               </button>
+              {editingGrade && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingGrade(null);
+                    setGradeData({
+                      subject: '',
+                      assignment: '',
+                      score: '',
+                      max_score: '',
+                      date: new Date().toISOString().split('T')[0]
+                    });
+                  }}
+                  className="bg-gray-600 text-white px-6 py-2 rounded-lg hover:bg-gray-700"
+                >
+                  Cancel
+                </button>
+              )}
             </div>
           </form>
         </div>
@@ -185,6 +249,9 @@ const Grades = () => {
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Assignment</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Score</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Percentage</th>
+                    {canManage && (
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                    )}
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
@@ -206,6 +273,24 @@ const Grades = () => {
                           {grade.percentage}%
                         </span>
                       </td>
+                      {canManage && (
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                          <div className="flex space-x-2">
+                            <button
+                              onClick={() => handleEdit(grade)}
+                              className="text-blue-600 hover:text-blue-900"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              onClick={() => handleDelete(grade.id)}
+                              className="text-red-600 hover:text-red-900"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>

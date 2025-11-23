@@ -6,6 +6,7 @@ const UserManagement = () => {
   const [users, setUsers] = useState([]);
   const [roles, setRoles] = useState([]);
   const [showForm, setShowForm] = useState(false);
+  const [editingUser, setEditingUser] = useState(null);
   const [newUser, setNewUser] = useState({
     username: '',
     email: '',
@@ -42,13 +43,48 @@ const UserManagement = () => {
     setError('');
     
     try {
-      await authAPI.register(newUser);
+      if (editingUser) {
+        await userAPI.update(editingUser.id, newUser);
+        setEditingUser(null);
+      } else {
+        await authAPI.register(newUser);
+      }
       setNewUser({ username: '', email: '', password: '', role: 'viewer' });
       setShowForm(false);
       loadUsers();
     } catch (error) {
-      setError(error.response?.data?.message || 'Error creating user');
+      setError(error.response?.data?.message || 'Error saving user');
     }
+  };
+
+  const handleEdit = (user) => {
+    setEditingUser(user);
+    setNewUser({
+      username: user.username,
+      email: user.email,
+      password: '',
+      role: user.role
+    });
+    setShowForm(true);
+    setError('');
+  };
+
+  const handleDelete = async (id) => {
+    if (window.confirm('Are you sure you want to delete this user?')) {
+      try {
+        await userAPI.delete(id);
+        loadUsers();
+      } catch (error) {
+        alert(error.response?.data?.message || 'Error deleting user');
+      }
+    }
+  };
+
+  const handleCancel = () => {
+    setShowForm(false);
+    setEditingUser(null);
+    setNewUser({ username: '', email: '', password: '', role: 'viewer' });
+    setError('');
   };
 
   if (!AuthService.isAdmin()) {
@@ -64,7 +100,15 @@ const UserManagement = () => {
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-bold text-gray-800">User Management</h2>
         <button
-          onClick={() => setShowForm(!showForm)}
+          onClick={() => {
+            if (showForm) {
+              handleCancel();
+            } else {
+              setShowForm(true);
+              setEditingUser(null);
+              setNewUser({ username: '', email: '', password: '', role: 'viewer' });
+            }
+          }}
           className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700"
         >
           {showForm ? 'Cancel' : '+ Add User'}
@@ -73,7 +117,9 @@ const UserManagement = () => {
 
       {showForm && (
         <div className="bg-white p-6 rounded-lg shadow">
-          <h3 className="text-xl font-semibold mb-4">Create New User</h3>
+          <h3 className="text-xl font-semibold mb-4">
+            {editingUser ? 'Edit User' : 'Create New User'}
+          </h3>
           {error && (
             <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
               {error}
@@ -88,6 +134,7 @@ const UserManagement = () => {
                 onChange={(e) => setNewUser({...newUser, username: e.target.value})}
                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                 required
+                disabled={!!editingUser}
               />
             </div>
             <div>
@@ -101,13 +148,15 @@ const UserManagement = () => {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Password</label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Password {editingUser && '(leave blank to keep current)'}
+              </label>
               <input
                 type="password"
                 value={newUser.password}
                 onChange={(e) => setNewUser({...newUser, password: e.target.value})}
                 className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                required
+                required={!editingUser}
               />
             </div>
             <div>
@@ -128,7 +177,7 @@ const UserManagement = () => {
                 type="submit"
                 className="bg-green-600 text-white px-6 py-2 rounded-lg hover:bg-green-700"
               >
-                Create User
+                {editingUser ? 'Update User' : 'Create User'}
               </button>
             </div>
           </form>
@@ -143,6 +192,7 @@ const UserManagement = () => {
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Username</th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Role</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
             </tr>
           </thead>
           <tbody className="bg-white divide-y divide-gray-200">
@@ -158,6 +208,22 @@ const UserManagement = () => {
                   }`}>
                     {user.role}
                   </span>
+                </td>
+                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                  <div className="flex space-x-2">
+                    <button
+                      onClick={() => handleEdit(user)}
+                      className="text-blue-600 hover:text-blue-900"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      onClick={() => handleDelete(user.id)}
+                      className="text-red-600 hover:text-red-900"
+                    >
+                      Delete
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}
